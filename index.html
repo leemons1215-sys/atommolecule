@@ -158,7 +158,13 @@ h1{font-size:1.9rem;font-weight:900;color:var(--text);letter-spacing:-.02em;line
 .tray-label{font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--text-muted);margin-bottom:.5rem;}
 .card-tray{display:flex;flex-wrap:wrap;gap:12px;min-height:130px;padding:14px;background:var(--surface);border:1.5px dashed var(--border2);border-radius:16px;margin-bottom:1.4rem;transition:background .2s,border-color .2s;}
 .card-tray.drag-over{background:var(--accent-light);border-color:var(--accent);}
-.matter-card{width:100px;height:136px;perspective:800px;cursor:pointer;flex-shrink:0;}
+.matter-card{width:100px;height:136px;perspective:800px;cursor:pointer;flex-shrink:0;
+  /* 터치 드래그 중 브라우저 기본 동작(스크롤·선택·말풍선) 차단 */
+  touch-action:none;
+  -webkit-touch-callout:none;
+  -webkit-user-select:none;
+  user-select:none;
+}
 .card-inner{width:100%;height:100%;position:relative;transform-style:preserve-3d;transition:transform .55s cubic-bezier(.4,0,.2,1);}
 .matter-card.flipped .card-inner{transform:rotateY(180deg);}
 .card-face{position:absolute;inset:0;backface-visibility:hidden;-webkit-backface-visibility:hidden;border-radius:14px;border:1.5px solid var(--border);background:var(--surface);overflow:hidden;display:flex;flex-direction:column;}
@@ -169,6 +175,34 @@ h1{font-size:1.9rem;font-weight:900;color:var(--text);letter-spacing:-.02em;line
 .card-name{font-size:13px;font-weight:700;color:var(--text);line-height:1.2;}
 .card-formula{font-size:12px;font-weight:500;color:var(--accent);line-height:1.2;}
 .matter-card:hover .card-face{border-color:var(--accent);box-shadow:0 4px 14px rgba(79,99,255,.15);}
+
+/* ── [ADDED] 터치 드래그 최적화 ── */
+/* 드래그 중인 원본 카드 — 반투명으로 "빠진" 느낌 */
+.matter-card.touch-dragging{opacity:.35;pointer-events:none;}
+/* 손가락을 따라다니는 고스트 카드 */
+#touch-ghost{
+  position:fixed;z-index:9999;pointer-events:none;
+  width:100px;height:136px;
+  transform:translate(-50%,-50%) scale(1.08) rotate(3deg);
+  box-shadow:0 12px 32px rgba(79,99,255,.35);
+  border-radius:14px;overflow:hidden;
+  transition:transform .1s;
+  /* GPU 가속 */
+  will-change:transform,left,top;
+}
+/* 터치 드롭존 하이라이트 */
+.drop-zone.touch-over{background:#eef0ff;border-color:var(--accent);border-style:dashed;}
+.card-tray.touch-over{background:var(--accent-light);border-color:var(--accent);}
+/* 모바일에서 카드 크기 키우기 */
+@media(max-width:768px){
+  .matter-card{width:88px;height:122px;}
+  .card-img,.card-particle-img{height:68px;}
+  .card-name{font-size:12px;}
+  .card-formula{font-size:11px;}
+  .zones-grid{grid-template-columns:repeat(3,1fr);gap:8px;}
+  .drop-zone{min-height:150px;padding:10px 7px;}
+  .card-tray{gap:8px;padding:10px;}
+}
 .zones-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:1.2rem;}
 .drop-zone{min-height:170px;border-radius:16px;border:2px dashed var(--border2);background:var(--surface);padding:12px 10px;transition:background .15s,border-color .15s;}
 .drop-zone.drag-over{background:#eef0ff;border-color:var(--accent);}
@@ -349,7 +383,7 @@ h1{font-size:1.9rem;font-weight:900;color:var(--text);letter-spacing:-.02em;line
       <div class="info-row">
         <span class="info-label">반</span>
         <input class="info-input" id="classInput" type="text" placeholder="예: 2-0" style="max-width:140px;">
-      </div
+      </div>
       <div class="info-row">
         <span class="info-label">모둠원</span>
         <input class="info-input" id="nameInput" type="text" placeholder="예: 홍길동, 홍길순">
@@ -498,12 +532,62 @@ function createCard(m){
   const bLbl=document.createElement("div");bLbl.className="card-label";
   bLbl.innerHTML=`<div class="card-name">${m.name}</div><div class="card-formula">${m.formula}</div>`;
   back.append(bVis,bLbl);inner.append(front,back);outer.appendChild(inner);
+  // ── [BEFORE] outer.addEventListener("click",...) — 그대로 유지
   outer.addEventListener("click",e=>{
     e.stopPropagation();const isF=outer.classList.toggle("flipped");flippedCards[m.id]=isF;
     if(isF&&!hasImg(m.id))setTimeout(()=>drawProc(m,bVis),0);
   });
   outer.addEventListener("dragstart",e=>{dragId=m.id;e.dataTransfer.setData("text/plain",m.id);setTimeout(()=>outer.classList.add("dragging"),0);});
   outer.addEventListener("dragend",()=>outer.classList.remove("dragging"));
+
+  // ── [ADDED] 터치 드래그 이벤트 ──────────────────────────────
+  // touchstart: 손가락이 닿는 순간 — 드래그 시작 판별 준비
+  let touchStartX=0,touchStartY=0,touchDragging=false,touchMoved=false;
+
+  outer.addEventListener("touchstart",e=>{
+    // 멀티터치 무시
+    if(e.touches.length>1)return;
+    const t=e.touches[0];
+    touchStartX=t.clientX;touchStartY=t.clientY;
+    touchDragging=false;touchMoved=false;
+    // draggable=true가 터치 이벤트와 충돌하지 않도록 임시 해제
+    outer.draggable=false;
+  },{passive:true});
+
+  outer.addEventListener("touchmove",e=>{
+    if(e.touches.length>1)return;
+    const t=e.touches[0];
+    const dx=t.clientX-touchStartX,dy=t.clientY-touchStartY;
+    const dist=Math.sqrt(dx*dx+dy*dy);
+
+    // 8px 이상 이동하면 드래그 시작
+    if(!touchDragging&&dist>8){
+      touchDragging=true;touchMoved=true;
+      dragId=m.id;
+      startTouchDrag(outer,m);
+    }
+    if(touchDragging){
+      // 스크롤 막기 (드래그 중)
+      e.preventDefault();
+      moveTouchGhost(t.clientX,t.clientY);
+      highlightTouchZone(t.clientX,t.clientY);
+    }
+  },{passive:false});
+
+  outer.addEventListener("touchend",e=>{
+    outer.draggable=true; // draggable 복원
+    if(touchDragging){
+      // 드래그 종료 — 현재 위치의 드롭존에 놓기
+      const t=e.changedTouches[0];
+      dropToTouchZone(t.clientX,t.clientY);
+      endTouchDrag(outer);
+    }else if(!touchMoved){
+      // 이동 없이 손가락 뗀 경우 = 탭(클릭) → 카드 플립
+      // click 이벤트가 자동 발생하므로 별도 처리 불필요
+    }
+    touchDragging=false;
+  },{passive:true});
+  // ────────────────────────────────────────────────────────────
   return outer;
 }
 function renderAll(){
@@ -526,6 +610,99 @@ document.getElementById("tray").addEventListener("drop",e=>{
   e.preventDefault();const id=e.dataTransfer.getData("text/plain")||dragId;
   if(id){cardZone[id]="tray";dragId=null;renderAll();}
 });
+
+// ── [ADDED] 터치 드래그 헬퍼 함수들 ─────────────────────────────
+
+let _touchGhost=null;      // 손가락 따라다니는 고스트 엘리먼트
+let _touchSourceEl=null;   // 드래그 중인 원본 카드 엘리먼트
+let _lastTouchZone=null;   // 마지막으로 하이라이트된 드롭존
+
+// 드래그 시작: 원본 카드 반투명 + 고스트 생성
+function startTouchDrag(cardEl,m){
+  _touchSourceEl=cardEl;
+  cardEl.classList.add("touch-dragging");
+
+  // 고스트: 원본 카드 복제해서 body에 붙이기
+  const ghost=document.createElement("div");
+  ghost.id="touch-ghost";
+  // 앞면 이미지만 간단히 표시
+  const img=document.createElement("img");
+  img.src=PHOTO[m.id];img.alt=m.name;
+  img.style.cssText="width:100%;height:78px;object-fit:cover;display:block;border-radius:10px 10px 0 0;";
+  const lbl=document.createElement("div");
+  lbl.style.cssText="background:#fff;padding:5px 4px;text-align:center;border-radius:0 0 10px 10px;";
+  lbl.innerHTML=`<div style="font-size:12px;font-weight:700;color:#1a1e3c">${m.name}</div>
+                 <div style="font-size:11px;color:#4f63ff">${m.formula}</div>`;
+  ghost.style.cssText="position:fixed;z-index:9999;pointer-events:none;width:100px;height:116px;transform:translate(-50%,-50%) scale(1.08) rotate(2deg);box-shadow:0 12px 32px rgba(79,99,255,.35);border-radius:14px;overflow:hidden;border:2px solid var(--accent);background:#fff;";
+  ghost.append(img,lbl);
+  document.body.appendChild(ghost);
+  _touchGhost=ghost;
+}
+
+// 고스트 위치 업데이트
+function moveTouchGhost(x,y){
+  if(!_touchGhost)return;
+  _touchGhost.style.left=x+"px";
+  _touchGhost.style.top=y+"px";
+}
+
+// 터치 좌표 아래 드롭존 찾기 (고스트는 pointer-events:none 이라 무시됨)
+function getTouchZoneAt(x,y){
+  // 드롭존 (0,1,2) 확인
+  for(let z=0;z<3;z++){
+    const el=document.getElementById("zone-"+z);
+    if(!el)continue;
+    const r=el.getBoundingClientRect();
+    if(x>=r.left&&x<=r.right&&y>=r.top&&y<=r.bottom)return{type:"zone",z};
+  }
+  // 트레이 확인
+  const tray=document.getElementById("tray");
+  if(tray){
+    const r=tray.getBoundingClientRect();
+    if(x>=r.left&&x<=r.right&&y>=r.top&&y<=r.bottom)return{type:"tray"};
+  }
+  return null;
+}
+
+// 이동 중 드롭존 하이라이트
+function highlightTouchZone(x,y){
+  // 이전 하이라이트 제거
+  if(_lastTouchZone){
+    _lastTouchZone.classList.remove("touch-over");
+    _lastTouchZone=null;
+  }
+  const hit=getTouchZoneAt(x,y);
+  if(hit){
+    const el=hit.type==="tray"
+      ? document.getElementById("tray")
+      : document.getElementById("zone-"+hit.z);
+    el.classList.add("touch-over");
+    _lastTouchZone=el;
+  }
+}
+
+// 손가락 뗄 때 해당 드롭존에 카드 배치
+function dropToTouchZone(x,y){
+  const hit=getTouchZoneAt(x,y);
+  if(hit&&dragId){
+    if(hit.type==="tray") cardZone[dragId]="tray";
+    else cardZone[dragId]=hit.z;
+    dragId=null;
+    renderAll();
+  }
+  // 하이라이트 제거
+  if(_lastTouchZone){_lastTouchZone.classList.remove("touch-over");_lastTouchZone=null;}
+}
+
+// 드래그 종료 정리
+function endTouchDrag(cardEl){
+  if(cardEl)cardEl.classList.remove("touch-dragging");
+  if(_touchGhost){_touchGhost.remove();_touchGhost=null;}
+  _touchSourceEl=null;
+  dragId=null;
+}
+
+// ────────────────────────────────────────────────────────────────
 function checkAnswer(){
   const msg=document.getElementById("resultMsg");
   const allPlaced=MATTERS.every(m=>{const z=cardZone[m.id];return z===0||z===1||z===2;});
